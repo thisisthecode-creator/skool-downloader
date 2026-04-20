@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+downloads/
+cookies.txt
+*.mp4
+*.part
+*.ytdl
+.DS_Store

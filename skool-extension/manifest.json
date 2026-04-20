@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Skool Video Downloader",
+  "version": "1.0.0",
+  "description": "Adds a download button to Skool videos",
+  "permissions": ["storage", "downloads"],
+  "background": { "service_worker": "background.js" },
+  "host_permissions": [
+    "https://www.skool.com/*",
+    "https://skool.amacon.dev/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.skool.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Skool Downloader Settings"
+  }
+}

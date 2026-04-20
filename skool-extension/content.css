@@ -1,0 +1,83 @@
+/* Player host container - needed for absolute positioning of the button */
+.skool-dl-host {
+  position: relative !important;
+}
+
+/* Base button style */
+.skool-dl-btn {
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  border: 0;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: -apple-system, system-ui, sans-serif;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  transition: background 0.15s, transform 0.1s, opacity 0.2s;
+  white-space: nowrap;
+}
+.skool-dl-btn:hover:not([data-busy]) {
+  background: rgba(30, 30, 30, 0.9);
+  transform: translateY(-1px);
+}
+.skool-dl-btn[data-busy] { cursor: wait; opacity: 0.85; }
+
+/* Button sitting inside the video player - top right corner, fades in on hover */
+.skool-dl-btn-in-player {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2147483647; /* max int - above any player overlay */
+  opacity: 0;
+  pointer-events: none;
+}
+.skool-dl-host:hover .skool-dl-btn-in-player,
+.skool-dl-btn-in-player[data-busy],
+.skool-dl-btn-in-player:focus {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Download-complete info panel */
+#skool-dl-info {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 2147483647;
+  width: 360px;
+  background: #111;
+  color: #fff;
+  padding: 14px 16px;
+  border-radius: 10px;
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 13px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  animation: sdlSlide 0.25s ease-out;
+}
+@keyframes sdlSlide { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+#skool-dl-info .sdl-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 14px; }
+#skool-dl-info .sdl-close { background: transparent; color: #888; border: 0; font-size: 20px; cursor: pointer; padding: 0 4px; line-height: 1; }
+#skool-dl-info .sdl-close:hover { color: #fff; }
+#skool-dl-info .sdl-path { color: #aaa; font-size: 11px; word-break: break-all; margin-bottom: 10px; font-family: ui-monospace, monospace; }
+#skool-dl-info .sdl-actions { display: flex; gap: 6px; margin-bottom: 8px; }
+#skool-dl-info .sdl-actions button { flex: 1; padding: 6px 10px; background: #333; color: #fff; border: 0; border-radius: 5px; cursor: pointer; font-size: 12px; font-weight: 600; }
+#skool-dl-info .sdl-actions button:hover { background: #444; }
+#skool-dl-info .sdl-reveal { background: #0a7 !important; }
+#skool-dl-info .sdl-reveal:hover { background: #0b8 !important; }
+#skool-dl-info .sdl-url { color: #6cf; font-size: 10px; word-break: break-all; font-family: ui-monospace, monospace; cursor: pointer; padding: 6px 8px; background: #000; border-radius: 4px; }
+#skool-dl-info .sdl-url:hover { background: #0a0a0a; }
+
+/* Floating fallback when no <video> element exists yet */
+#skool-dl-floating {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 2147483647;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
