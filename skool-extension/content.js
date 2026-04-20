@@ -1,5 +1,6 @@
-// Skool Video Downloader - content script
-// Finds videos (via __NEXT_DATA__ or page scan), overlays a download button on the video player.
+// Universal Video Downloader - content script
+// - On Skool: extracts playbackId/token from __NEXT_DATA__ (fast path)
+// - On any other site with a <video>: sends page URL to backend, yt-dlp extracts
 
 const DEFAULT_BACKEND = "https://skool.amacon.dev";
 
@@ -9,16 +10,9 @@ function getBackend() {
   });
 }
 
-// ---- Video discovery -------------------------------------------------
+const isSkool = () => location.hostname.endsWith("skool.com");
 
-function extractFromNextData() {
-  const s = document.getElementById("__NEXT_DATA__");
-  if (!s) return [];
-  try {
-    const data = JSON.parse(s.textContent);
-    return findVideos(data);
-  } catch { return []; }
-}
+// ---- Video discovery (Skool fast-path) ------------------------------
 
 function findVideos(obj, out = []) {
   if (!obj || typeof obj !== "object") return out;
@@ -28,55 +22,49 @@ function findVideos(obj, out = []) {
   return out;
 }
 
-// Fallback: scrape tokens from the whole DOM (covers SPA-loaded lessons where __NEXT_DATA__ is stale)
-function extractFromDom() {
+function getSkoolTokens() {
   const out = [];
-  // Look in all script tags for playbackId/playbackToken pairs
+  const nd = document.getElementById("__NEXT_DATA__");
+  if (nd) {
+    try { findVideos(JSON.parse(nd.textContent), out); } catch {}
+  }
   const text = Array.from(document.querySelectorAll("script")).map(s => s.textContent).join("\n");
   const re = /"playbackId"\s*:\s*"([^"]+)"[^}]*?"playbackToken"\s*:\s*"([^"]+)"/g;
-  let m;
-  while ((m = re.exec(text))) out.push({ playbackId: m[1], playbackToken: m[2] });
-
-  // Also try reverse order
-  const re2 = /"playbackToken"\s*:\s*"([^"]+)"[^}]*?"playbackId"\s*:\s*"([^"]+)"/g;
-  while ((m = re2.exec(text))) out.push({ playbackId: m[2], playbackToken: m[1] });
-  return out;
-}
-
-function getAllVideos() {
-  const all = [...extractFromNextData(), ...extractFromDom()];
+  let m; while ((m = re.exec(text))) out.push({ playbackId: m[1], playbackToken: m[2] });
   const seen = new Set();
-  return all.filter(v => {
-    if (seen.has(v.playbackId)) return false;
-    seen.add(v.playbackId);
-    return true;
-  });
+  return out.filter(v => seen.has(v.playbackId) ? false : (seen.add(v.playbackId), true));
 }
 
 function getPageTitle() {
-  const h1 = document.querySelector("h1");
-  return (h1?.textContent || document.title || "skool_video").trim();
+  return (document.querySelector("h1")?.textContent || document.title || "video").trim();
 }
 
-// ---- Backend calls ---------------------------------------------------
+// ---- Job flow --------------------------------------------------------
 
-async function startDownload(video, btn, label) {
-  const original = label;
+async function startJob(btn, original) {
   btn.dataset.busy = "1";
   btn.textContent = "Starting...";
   const backend = await getBackend();
+
   try {
-    const r = await fetch(backend + "/direct", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        playbackId: video.playbackId,
-        playbackToken: video.playbackToken,
-        title: getPageTitle(),
-      }),
-    });
-    const j = await r.json();
-    if (!r.ok || !j.job_id) throw new Error(j.error || "Start failed");
+    let startResp;
+    if (isSkool()) {
+      const tokens = getSkoolTokens();
+      if (!tokens.length) throw new Error("No video on page");
+      const v = tokens[0];
+      startResp = await fetch(backend + "/direct", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ playbackId: v.playbackId, playbackToken: v.playbackToken, title: getPageTitle() }),
+      });
+    } else {
+      // Generic path - yt-dlp handles YouTube, Vimeo, Wistia, Brightcove, etc
+      startResp = await fetch(backend + "/url", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: location.href, title: getPageTitle() }),
+      });
+    }
+    const j = await startResp.json();
+    if (!startResp.ok || !j.job_id) throw new Error(j.error || "Start failed");
     pollJob(j.job_id, btn, backend, original);
   } catch (e) {
     btn.textContent = "✗ " + e.message;
@@ -85,23 +73,14 @@ async function startDownload(video, btn, label) {
 }
 
 async function pollJob(jobId, btn, backend, original) {
-  if (!jobId) {
-    btn.textContent = "✗ bad job";
-    setTimeout(() => { btn.textContent = original; delete btn.dataset.busy; }, 3000);
-    return;
-  }
+  if (!jobId) return;
   try {
     const r = await fetch(backend + "/status/" + jobId);
-    if (!r.ok) {
-      btn.textContent = "✗ job lost";
-      setTimeout(() => { btn.textContent = original; delete btn.dataset.busy; }, 3000);
-      return;
-    }
+    if (!r.ok) throw new Error("job lost");
     const j = await r.json();
+
     if (j.status === "done" && j.files?.length) {
       const f = j.files[0];
-      // Fetch file in content script context (extension host_permissions allow this),
-      // then trigger download via blob URL (always works, cross-origin bypass).
       const fileUrl = backend + "/file/" + f.path;
       btn.textContent = "⏳ transferring...";
       try {
@@ -110,22 +89,15 @@ async function pollJob(jobId, btn, backend, original) {
         const blob = await fr.blob();
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        a.href = blobUrl;
-        a.download = f.name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+        a.href = blobUrl; a.download = f.name;
+        document.body.appendChild(a); a.click(); a.remove();
         setTimeout(() => URL.revokeObjectURL(blobUrl), 120000);
-        // Tell server to delete the file
         fetch(backend + "/delete/" + f.path, { method: "DELETE" }).catch(() => {});
         btn.textContent = "✓ Downloaded";
-        // Show info panel
         showInfoPanel({ filename: f.name, url: fileUrl });
       } catch (e) {
         btn.textContent = "✗ " + e.message;
       }
-      setTimeout(() => { btn.textContent = original; delete btn.dataset.busy; }, 4000);
-      btn.textContent = "✓ Downloaded";
       setTimeout(() => { btn.textContent = original; delete btn.dataset.busy; }, 4000);
       return;
     }
@@ -134,14 +106,12 @@ async function pollJob(jobId, btn, backend, original) {
       setTimeout(() => { btn.textContent = original; delete btn.dataset.busy; }, 4000);
       return;
     }
-    if (j.status === "downloading" && typeof j.progress === "number") {
-      btn.textContent = `⏳ ${j.progress.toFixed(1)}%`;
-    } else {
-      btn.textContent = "⏳ " + j.status;
-    }
+    btn.textContent = (j.status === "downloading" && typeof j.progress === "number")
+      ? `⏳ ${j.progress.toFixed(1)}%`
+      : "⏳ " + j.status;
     setTimeout(() => pollJob(jobId, btn, backend, original), 2500);
-  } catch {
-    btn.textContent = "✗ net";
+  } catch (e) {
+    btn.textContent = "✗ " + (e.message || "net");
     setTimeout(() => { btn.textContent = original; delete btn.dataset.busy; }, 4000);
   }
 }
@@ -149,7 +119,6 @@ async function pollJob(jobId, btn, backend, original) {
 // ---- Button injection ------------------------------------------------
 
 function findPlayerContainer(videoEl) {
-  // Walk up to find a reasonably-sized ancestor that looks like the player wrapper.
   let el = videoEl.parentElement;
   while (el && el !== document.body) {
     const r = el.getBoundingClientRect();
@@ -159,69 +128,60 @@ function findPlayerContainer(videoEl) {
   return videoEl.parentElement;
 }
 
-function makeButton(video, label = "⬇ Download") {
+function makeButton(label = "⬇ Download") {
   const b = document.createElement("button");
   b.className = "skool-dl-btn";
   b.textContent = label;
   b.title = "Download this video";
   b.onclick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
+    e.preventDefault(); e.stopPropagation();
     if (b.dataset.busy) return;
-    startDownload(video, b, label);
+    startJob(b, label);
   };
   return b;
 }
 
+function shouldInjectHere() {
+  // Always inject on Skool (even if <video> isn't rendered yet)
+  if (isSkool()) return true;
+  // Otherwise only if there's at least one <video> element
+  return document.querySelector("video") !== null;
+}
+
 function injectButtons() {
-  const videos = getAllVideos();
-  if (!videos.length) {
-    // Clean up floating button if videos disappeared
+  if (!shouldInjectHere()) {
     document.getElementById("skool-dl-floating")?.remove();
     return;
   }
 
   const videoEls = Array.from(document.querySelectorAll("video"));
 
+  // No video element yet - floating button in corner
   if (videoEls.length === 0) {
-    // No rendered player yet - show floating fallback so user can still download
     if (!document.getElementById("skool-dl-floating")) {
       const wrap = document.createElement("div");
       wrap.id = "skool-dl-floating";
-      videos.forEach((v, i) => {
-        const label = videos.length > 1 ? `⬇ Video ${i + 1}` : "⬇ Download";
-        wrap.appendChild(makeButton(v, label));
-      });
+      wrap.appendChild(makeButton());
       document.body.appendChild(wrap);
     }
     return;
   }
 
-  // If we have a rendered player, remove the floating fallback
   document.getElementById("skool-dl-floating")?.remove();
 
-  videoEls.forEach((vel, i) => {
-    if (vel.dataset.skoolDlInjected) return;
-    const video = videos[i] || videos[0];
-    if (!video) return;
-
+  videoEls.forEach((vel) => {
+    if (vel.dataset.dlInjected) return;
     const container = findPlayerContainer(vel);
     if (!container) return;
-
     container.classList.add("skool-dl-host");
-    const btn = makeButton(video);
+    const btn = makeButton();
     btn.classList.add("skool-dl-btn-in-player");
     container.appendChild(btn);
-    vel.dataset.skoolDlInjected = "1";
+    vel.dataset.dlInjected = "1";
   });
 }
 
-// ---- Run & observe SPA -----------------------------------------------
-
-injectButtons();
-setInterval(injectButtons, 1500);
-
-// ---- Download-complete info panel -----------------------------------
+// ---- Info panel ------------------------------------------------------
 
 function showInfoPanel({ filename, url }) {
   document.getElementById("skool-dl-info")?.remove();
@@ -231,9 +191,7 @@ function showInfoPanel({ filename, url }) {
     <div class="sdl-row"><strong>✓ Saved to Downloads</strong>
       <button class="sdl-close" title="Close">×</button></div>
     <div class="sdl-path">~/Downloads/${filename}</div>
-    <div class="sdl-actions">
-      <button class="sdl-copy">Copy URL</button>
-    </div>
+    <div class="sdl-actions"><button class="sdl-copy">Copy URL</button></div>
     <div class="sdl-url" title="Click to copy">${url}</div>
   `;
   document.body.appendChild(panel);
@@ -247,3 +205,7 @@ function showInfoPanel({ filename, url }) {
   setTimeout(() => panel.remove(), 15000);
 }
 
+// ---- Run ------------------------------------------------------------
+
+injectButtons();
+setInterval(injectButtons, 1500);

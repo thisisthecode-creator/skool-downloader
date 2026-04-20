@@ -3,6 +3,7 @@
 
 import os
 import re
+import subprocess
 import threading
 import uuid
 from pathlib import Path
@@ -168,6 +169,74 @@ def direct():
         except Exception as e:
             job["status"] = "error"
             job["error"] = str(e)
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/url", methods=["POST", "OPTIONS"])
+def url_download():
+    """Generic endpoint - pass any video page URL, yt-dlp handles extraction.
+    Works for YouTube, Vimeo, Wistia, Brightcove, and 1000+ other sites."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+    data = request.json or {}
+    url = (data.get("url") or "").strip()
+    title_hint = (data.get("title") or "").strip() or "video"
+    if not re.match(r"^https?://", url):
+        return jsonify({"error": "invalid url"}), 400
+
+    job_id = uuid.uuid4().hex[:12]
+    JOBS[job_id] = {"status": "starting", "url": url, "files": []}
+
+    def run():
+        job = JOBS[job_id]
+        try:
+            job["status"] = "downloading"
+            name = sanitize_filename(title_hint)
+            out_tmpl = str(DOWNLOADS / f"{job_id}_{name}.%(ext)s")
+            cmd = [
+                "yt-dlp", "--newline", "--progress",
+                "--no-playlist",
+                "--merge-output-format", "mp4",
+                "-f", "bv*+ba/b",
+                "-o", out_tmpl,
+                url,
+            ]
+            # Optional cookies file for authenticated content
+            if COOKIES_FILE.exists():
+                cmd.extend(["--cookies", str(COOKIES_FILE)])
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1)
+            pct_re = re.compile(r"\[download\]\s+(\d+\.\d+)%")
+            final_path = None
+            dest_re = re.compile(r"\[download\] Destination: (.+)")
+            merger_re = re.compile(r"\[Merger\] Merging formats into \"(.+)\"")
+            for line in proc.stdout:
+                m = pct_re.search(line)
+                if m:
+                    try: job["progress"] = float(m.group(1))
+                    except Exception: pass
+                m2 = dest_re.search(line) or merger_re.search(line)
+                if m2:
+                    final_path = m2.group(1).strip()
+            proc.wait()
+            if proc.returncode != 0:
+                job["status"] = "error"
+                job["error"] = f"yt-dlp exited {proc.returncode}"
+                return
+            # Find the output file (yt-dlp may have picked any extension)
+            if final_path and Path(final_path).exists():
+                p = Path(final_path)
+            else:
+                candidates = sorted(DOWNLOADS.glob(f"{job_id}_*"), key=lambda x: x.stat().st_mtime, reverse=True)
+                p = candidates[0] if candidates else None
+            if not p or not p.exists():
+                job["status"] = "error"; job["error"] = "output file not found"; return
+            job["files"] = [{"name": p.name.split("_", 1)[-1], "path": p.name}]
+            job["status"] = "done"
+        except Exception as e:
+            job["status"] = "error"; job["error"] = str(e)
 
     threading.Thread(target=run, daemon=True).start()
     return jsonify({"job_id": job_id})
